@@ -121,6 +121,9 @@ typedef struct {
     uint16_t timer_value;
     uint8_t length_counter;
     uint8_t sequence_pos;
+    uint8_t linear_counter;
+    uint8_t linear_counter_reload;
+    bool linear_counter_reload_flag;
 } triangle_channel_t;
 
 typedef struct {
@@ -175,6 +178,14 @@ typedef struct apu {
     float sample_buffer[4096];
     uint32_t sample_write_pos;
     uint32_t sample_read_pos;
+    
+    // Audio filters
+    float highpass_prev_in;
+    float highpass_prev_out;
+    float lowpass_prev_out;
+    
+    // Accurate sample timing
+    float sample_accumulator;
 } apu_t;
 
 /************************************ PPU ************************************/
@@ -2756,6 +2767,7 @@ static uint8_t pulse_output(pulse_channel_t *pulse);
 
 static void triangle_tick_timer(triangle_channel_t *tri);
 static void triangle_tick_length_counter(triangle_channel_t *tri);
+static void triangle_tick_linear_counter(triangle_channel_t *tri);
 static uint8_t triangle_output(triangle_channel_t *tri);
 
 static void noise_tick_timer(noise_channel_t *noise);
@@ -2768,6 +2780,8 @@ static uint8_t dmc_output(dmc_channel_t *dmc);
 
 static void apu_tick_frame_counter(apu_t *apu);
 static float mix_audio(uint8_t pulse1, uint8_t pulse2, uint8_t triangle, uint8_t noise, uint8_t dmc);
+static float apply_highpass_filter(apu_t *apu, float sample);
+static float apply_lowpass_filter(apu_t *apu, float sample);
 
 void apu_init(apu_t *apu, agnes_t *agnes) {
     memset(apu, 0, sizeof(apu_t));
@@ -2794,9 +2808,16 @@ void apu_tick(apu_t *apu) {
     // Triangle runs at CPU rate
     triangle_tick_timer(&apu->triangle);
     
-    // Generate audio sample (at ~44.1kHz, NES CPU is ~1.79MHz)
-    // Sample every ~40.5 cycles
-    if (apu->cycles % 40 == 0) {
+    // Generate audio sample with accurate timing
+    // NES CPU: ~1.789773 MHz, Target: 44100 Hz
+    // Cycles per sample: 1789773 / 44100 ≈ 40.584
+    const float CYCLES_PER_SAMPLE = 40.584f;
+    
+    apu->sample_accumulator += 1.0f;
+    
+    if (apu->sample_accumulator >= CYCLES_PER_SAMPLE) {
+        apu->sample_accumulator -= CYCLES_PER_SAMPLE;
+        
         uint8_t p1 = pulse_output(&apu->pulse1);
         uint8_t p2 = pulse_output(&apu->pulse2);
         uint8_t tri = triangle_output(&apu->triangle);
@@ -2805,8 +2826,16 @@ void apu_tick(apu_t *apu) {
         
         float sample = mix_audio(p1, p2, tri, noise, dmc);
         
-        apu->sample_buffer[apu->sample_write_pos] = sample;
-        apu->sample_write_pos = (apu->sample_write_pos + 1) % 4096;
+        // Apply filters to reduce noise
+        sample = apply_highpass_filter(apu, sample);
+        sample = apply_lowpass_filter(apu, sample);
+        
+        // Prevent buffer overflow
+        uint32_t next_write_pos = (apu->sample_write_pos + 1) % 4096;
+        if (next_write_pos != apu->sample_read_pos) {
+            apu->sample_buffer[apu->sample_write_pos] = sample;
+            apu->sample_write_pos = next_write_pos;
+        }
     }
 }
 
@@ -2880,6 +2909,7 @@ void apu_write_register(apu_t *apu, uint16_t addr, uint8_t val) {
         // Triangle
         case 0x4008:
             apu->triangle.length_counter_halt = (val >> 7) & 0x1;
+            apu->triangle.linear_counter_reload = val & 0x7f;
             break;
         case 0x400A:
             apu->triangle.timer_period = (apu->triangle.timer_period & 0x700) | val;
@@ -2887,6 +2917,7 @@ void apu_write_register(apu_t *apu, uint16_t addr, uint8_t val) {
         case 0x400B:
             apu->triangle.timer_period = (apu->triangle.timer_period & 0xff) | ((val & 0x7) << 8);
             apu->triangle.length_counter = length_table[val >> 3];
+            apu->triangle.linear_counter_reload_flag = true;
             break;
             
         // Noise
@@ -3046,7 +3077,8 @@ static uint8_t pulse_output(pulse_channel_t *pulse) {
 static void triangle_tick_timer(triangle_channel_t *tri) {
     if (tri->timer_value == 0) {
         tri->timer_value = tri->timer_period;
-        if (tri->length_counter > 0) {
+        // Only clock sequencer if both counters are non-zero
+        if (tri->length_counter > 0 && tri->linear_counter > 0) {
             tri->sequence_pos = (tri->sequence_pos + 1) % 32;
         }
     } else {
@@ -3060,8 +3092,24 @@ static void triangle_tick_length_counter(triangle_channel_t *tri) {
     }
 }
 
+static void triangle_tick_linear_counter(triangle_channel_t *tri) {
+    if (tri->linear_counter_reload_flag) {
+        tri->linear_counter = tri->linear_counter_reload;
+    } else if (tri->linear_counter > 0) {
+        tri->linear_counter--;
+    }
+    
+    if (!tri->length_counter_halt) {
+        tri->linear_counter_reload_flag = false;
+    }
+}
+
 static uint8_t triangle_output(triangle_channel_t *tri) {
-    if (!tri->enabled || tri->length_counter == 0) {
+    if (!tri->enabled || tri->length_counter == 0 || tri->linear_counter == 0) {
+        return 0;
+    }
+    // Silence ultrasonic frequencies to reduce noise
+    if (tri->timer_period < 2) {
         return 0;
     }
     return triangle_table[tri->sequence_pos];
@@ -3197,6 +3245,7 @@ static void apu_tick_frame_counter(apu_t *apu) {
             pulse_tick_envelope(&apu->pulse1);
             pulse_tick_envelope(&apu->pulse2);
             noise_tick_envelope(&apu->noise);
+            triangle_tick_linear_counter(&apu->triangle);
             
             if (step == 1 || step == 3) {
                 // Half frame (length counter & sweep)
@@ -3224,6 +3273,7 @@ static void apu_tick_frame_counter(apu_t *apu) {
             pulse_tick_envelope(&apu->pulse1);
             pulse_tick_envelope(&apu->pulse2);
             noise_tick_envelope(&apu->noise);
+            triangle_tick_linear_counter(&apu->triangle);
             
             if (step == 1 || step == 4) {
                 pulse_tick_length_counter(&apu->pulse1);
@@ -3252,5 +3302,33 @@ static float mix_audio(uint8_t pulse1, uint8_t pulse2, uint8_t triangle, uint8_t
     }
     
     return pulse_out + tnd_out;
+}
+
+// High-pass filter (90 Hz cutoff for removing DC offset)
+static float apply_highpass_filter(apu_t *apu, float sample) {
+    // First-order high-pass filter
+    // y[n] = alpha * (y[n-1] + x[n] - x[n-1])
+    // alpha = RC / (RC + dt), where fc = 1/(2*pi*RC)
+    // For 90 Hz at 44100 Hz: alpha ≈ 0.996
+    const float alpha = 0.996f;
+    
+    float output = alpha * (apu->highpass_prev_out + sample - apu->highpass_prev_in);
+    apu->highpass_prev_in = sample;
+    apu->highpass_prev_out = output;
+    
+    return output;
+}
+
+// Low-pass filter (14 kHz cutoff for smoothing)
+static float apply_lowpass_filter(apu_t *apu, float sample) {
+    // First-order low-pass filter
+    // y[n] = alpha * x[n] + (1 - alpha) * y[n-1]
+    // For 14 kHz at 44100 Hz: alpha ≈ 0.53
+    const float alpha = 0.53f;
+    
+    float output = alpha * sample + (1.0f - alpha) * apu->lowpass_prev_out;
+    apu->lowpass_prev_out = output;
+    
+    return output;
 }
 //FILE_END
