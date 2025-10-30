@@ -21,12 +21,12 @@ static void audioCallback(float* buffer, int num_frames, int num_channels, void*
 static void* read_file(const char *filename, size_t *out_len);
 
 void init() {
-    sg_desc desc = {};
+    sg_desc desc = {0};
     desc.environment = sglue_environment();
     desc.logger.func = slog_func;
     sg_setup(&desc);
 
-    saudio_desc as_desc = {};
+    saudio_desc as_desc = {0};
     as_desc.logger.func = slog_func;
     as_desc.buffer_frames = 1024;
     // as_desc.num_channels = 2;
@@ -43,17 +43,17 @@ void init() {
             1.0,  1.0,  0.0, 1.0, 0.0,
             -1.0, 1.0,  0.0, 0.0, 0.0,
     };
-    sg_buffer_desc vb_desc = {};
+    sg_buffer_desc vb_desc = {0};
     vb_desc.data = SG_RANGE(vertices);
     vbuf = sg_make_buffer(&vb_desc);
 
     const int indices[] = { 0, 1, 2, 0, 2, 3, };
-    sg_buffer_desc ib_desc = {};
+    sg_buffer_desc ib_desc = {0};
     ib_desc.usage.index_buffer = true;
     ib_desc.data = SG_RANGE(indices);
     ibuf = sg_make_buffer(&ib_desc);
 
-    sg_shader_desc shd_desc = {};
+    sg_shader_desc shd_desc = {0};
     shd_desc.attrs[0].glsl_name = "position";
     shd_desc.attrs[1].glsl_name = "texcoord0";
     shd_desc.vertex_func.source = "#version 330\n\
@@ -79,7 +79,7 @@ void main() {\n\
   //frag_color = pow(frag_color, vec4(1.0f/2.2f));\n\
 }\n";
 
-    sg_image_desc img_desc = {};
+    sg_image_desc img_desc = {0};
     img_desc.width = AGNES_SCREEN_WIDTH;
     img_desc.height = AGNES_SCREEN_HEIGHT;
     img_desc.label = "nes-texture";
@@ -88,7 +88,7 @@ void main() {\n\
 
     sg_shader shd = sg_make_shader(&shd_desc);
 
-    sg_pipeline_desc pip_desc = {};
+    sg_pipeline_desc pip_desc = {0};
     pip_desc.shader = shd;
     pip_desc.layout.attrs[0].format = SG_VERTEXFORMAT_FLOAT3;
     pip_desc.layout.attrs[1].format = SG_VERTEXFORMAT_FLOAT2;
@@ -210,18 +210,23 @@ int main(int argc, const char* argv[]) {
 }
 
 static void audioCallback(float* buffer, int num_frames, int num_channels, void* user_data) {
-    // NES* nes = (NES*)user_data;
-    //
-    // nes->apu->streamMutex.lock();
-    // for (int i = 0; i < num_frames; i++) {
-    //     if (i < nes->apu->stream.size()) {
-    //         // buffer[i*2+0] = nes->apu->stream.front();
-    //         // buffer[i*2+1] = nes->apu->stream.front();
-    //         buffer[i] = nes->apu->stream.front();
-    //         nes->apu->stream.erase(nes->apu->stream.begin());
-    //     }
-    // }
-    // nes->apu->streamMutex.unlock();
+    if (!nes) {
+        // Fill with silence if NES is not initialized
+        for (int i = 0; i < num_frames * num_channels; i++) {
+            buffer[i] = 0.0f;
+        }
+        return;
+    }
+    
+    // Fill the audio buffer with samples from the APU
+    for (int i = 0; i < num_frames; i++) {
+        float sample = agnes_get_audio_sample(nes);
+        
+        // Write to all channels (mono or stereo)
+        for (int ch = 0; ch < num_channels; ch++) {
+            buffer[i * num_channels + ch] = sample;
+        }
+    }
 }
 
 static void* read_file(const char *filename, size_t *out_len) {
