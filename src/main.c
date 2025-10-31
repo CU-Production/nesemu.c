@@ -186,13 +186,18 @@ void input(const sapp_event* event) {
     }
 }
 
-int main(int argc, const char* argv[]) {
-    if (argc < 2) {
+#if WIN32
+int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmdshow)
+#else
+int main(int __argc, char **__argv)
+#endif
+{
+    if (__argc < 2) {
         fprintf(stderr, "Please pass ROM path as first parameter.\n");
         return EXIT_FAILURE;
     }
 
-    const char *ines_name = argv[1];
+    const char *ines_name = __argv[1];
 
     size_t ines_data_size = 0;
     void* ines_data = read_file(ines_name, &ines_data_size);
