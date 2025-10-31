@@ -189,7 +189,7 @@ void input(const sapp_event* event) {
 #if WIN32
 int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmdshow)
 #else
-int main(int __argc, char **__argv)
+int main(int argc, char **argv)
 #endif
 {
     if (__argc < 2) {
@@ -207,7 +207,19 @@ int main(int __argc, char **__argv)
     }
 
     nes = agnes_make();
-    agnes_load_ines_data(nes, ines_data, ines_data_size);
+    if (!nes) {
+        fprintf(stderr, "Failed to create NES emulator instance.\n");
+        free(ines_data);
+        return EXIT_FAILURE;
+    }
+    
+    bool load_ok = agnes_load_ines_data(nes, ines_data, ines_data_size);
+    if (!load_ok) {
+        fprintf(stderr, "Failed to load ROM. Invalid or unsupported format.\n");
+        agnes_destroy(nes);
+        free(ines_data);
+        return EXIT_FAILURE;
+    }
 
     sapp_desc desc = {0};
     desc.init_cb = init;
@@ -216,7 +228,7 @@ int main(int __argc, char **__argv)
     desc.event_cb = input,
     desc .width = AGNES_SCREEN_WIDTH,
     desc.height = AGNES_SCREEN_HEIGHT,
-    desc.window_title = "nesemu.cpp",
+    desc.window_title = "nesemu.c",
     desc.icon.sokol_default = true,
     desc.logger.func = slog_func;
     sapp_run(&desc);
@@ -248,7 +260,7 @@ static void audioCallback(float* buffer, int num_frames, int num_channels, void*
 }
 
 static void* read_file(const char *filename, size_t *out_len) {
-    FILE *fp = fopen(filename, "r");
+    FILE *fp = fopen(filename, "rb");  // Use binary mode for ROM files
     if (!fp) {
         return NULL;
     }
