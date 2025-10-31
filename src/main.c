@@ -14,6 +14,7 @@ sg_buffer vbuf = {0};
 sg_buffer ibuf = {0};
 sg_pipeline pip = {0};
 sg_bindings bind = {0};
+sg_image img = {0};
 
 agnes_t* nes;
 agnes_input_t controller1 = {0};
@@ -66,9 +67,14 @@ void main() {\n\
   uv = texcoord0;\n\
   color = vec4(uv, 0.0f, 1.0f);\n\
 }\n";
-//    shd_desc.images[0].name = "tex";
-    shd_desc.images[0].image_type = SG_IMAGETYPE_2D;
-    shd_desc.images[0].sample_type = SG_IMAGESAMPLETYPE_FLOAT;
+    shd_desc.views[0].texture.stage = SG_SHADERSTAGE_FRAGMENT;
+    shd_desc.samplers[0].stage = SG_SHADERSTAGE_FRAGMENT;
+    shd_desc.texture_sampler_pairs[0] = (sg_shader_texture_sampler_pair){
+        .stage = SG_SHADERSTAGE_FRAGMENT,
+        .glsl_name = "tex",
+        .view_slot = 0,
+        .sampler_slot = 0,
+    };
     shd_desc.fragment_func.source = "#version 330\n\
 uniform sampler2D tex;\n\
 in vec4 color;\n\
@@ -85,6 +91,7 @@ void main() {\n\
     img_desc.label = "nes-texture";
     img_desc.pixel_format = SG_PIXELFORMAT_RGBA8;
     img_desc.usage.stream_update = true;
+    img = sg_make_image(&img_desc);
 
     sg_shader shd = sg_make_shader(&shd_desc);
 
@@ -97,7 +104,13 @@ void main() {\n\
 
     bind.vertex_buffers[0] = vbuf;
     bind.index_buffer = ibuf;
-    bind.images[0] = sg_make_image(&img_desc);
+    bind.views[0] = sg_make_view(&(sg_view_desc){ .texture.image = img });
+    bind.samplers[0] = sg_make_sampler(&(sg_sampler_desc){
+        .min_filter = SG_FILTER_LINEAR,
+        .mag_filter = SG_FILTER_LINEAR,
+        .wrap_u = SG_WRAP_CLAMP_TO_EDGE,
+        .wrap_v = SG_WRAP_CLAMP_TO_EDGE,
+    });
 
     pass_action.colors[0] = (sg_color_attachment_action){
         .load_action = SG_LOADACTION_CLEAR,
@@ -122,8 +135,8 @@ void frame() {
         }
     }
 
-    sg_update_image(bind.images[0], &(sg_image_data){
-        .subimage[0][0] = (sg_range){ .ptr=&tmp_image, .size=(AGNES_SCREEN_WIDTH * AGNES_SCREEN_HEIGHT * sizeof(uint32_t)) }
+    sg_update_image(img, &(sg_image_data){
+        .mip_levels[0] = (sg_range){ .ptr=&tmp_image, .size=(AGNES_SCREEN_WIDTH * AGNES_SCREEN_HEIGHT * sizeof(uint32_t)) }
     });
 
     sg_begin_pass(&(sg_pass){ .action = pass_action, .swapchain = sglue_swapchain(), .label = "main pass" });
